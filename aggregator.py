@@ -31,6 +31,12 @@ class CalibrationAndEdgeCore:
     """Layer 2: Statistical Calculation Core & SQLite Tracker"""
 
     _BUCKET_RANGE_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)")
+    _BUCKET_OR_BELOW_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°?F?\s*or below", re.IGNORECASE)
+    _BUCKET_OR_HIGHER_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*°?F?\s*or higher", re.IGNORECASE)
+    # Effectively -infinity/+infinity for a Fahrenheit Gaussian, used to bound
+    # the open-ended tail buckets ("73°F or below", "92°F or higher") that
+    # live Polymarket markets use for their outermost brackets.
+    _OPEN_BOUND = 1000.0
 
     def __init__(self, db_path: str = "dashboard_alpha.db"):
         self.db_path = db_path
@@ -67,7 +73,16 @@ class CalibrationAndEdgeCore:
 
     @staticmethod
     def _parse_bucket_range(bucket: str) -> tuple:
-        """Extract the (low, high) degF bounds from a label like '78-80°F'."""
+        """Extract the (low, high) degF bounds from a label like '78-80°F',
+        '73°F or below', or '92°F or higher'."""
+        below_match = CalibrationAndEdgeCore._BUCKET_OR_BELOW_RE.search(bucket)
+        if below_match:
+            return (-CalibrationAndEdgeCore._OPEN_BOUND, float(below_match.group(1)))
+
+        higher_match = CalibrationAndEdgeCore._BUCKET_OR_HIGHER_RE.search(bucket)
+        if higher_match:
+            return (float(higher_match.group(1)), CalibrationAndEdgeCore._OPEN_BOUND)
+
         match = CalibrationAndEdgeCore._BUCKET_RANGE_RE.search(bucket)
         if not match:
             raise ValueError(f"Unable to parse temperature bucket: {bucket!r}")
