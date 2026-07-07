@@ -4,22 +4,9 @@ import re
 import time
 import math
 import statistics
-import requests
 from datetime import datetime
 
-# Ground-station coordinates for the weather stations tracked by the
-# Polymarket temperature markets. Add an entry here before calling
-# fetch_weather_matrix() with a new station_id.
-STATION_COORDINATES = {
-    "KORD": (41.9786, -87.9048),   # Chicago O'Hare Intl
-    "KNYC": (40.7794, -73.9692),   # Central Park, NYC
-    "KAUS": (30.1975, -97.6664),   # Austin-Bergstrom Intl
-    "KMIA": (25.7959, -80.2870),   # Miami Intl
-    "KLAX": (33.9382, -118.3866),  # LAX
-    "KDEN": (39.8461, -104.6737),  # Denver Intl
-}
-
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+from weather_source import fetch_station_temperatures
 
 
 class IngestionEngine:
@@ -28,28 +15,7 @@ class IngestionEngine:
         pass
 
     def fetch_weather_matrix(self, station_id: str) -> dict:
-        if station_id not in STATION_COORDINATES:
-            raise ValueError(
-                f"Unknown station_id {station_id!r}; add its coordinates to STATION_COORDINATES."
-            )
-        latitude, longitude = STATION_COORDINATES[station_id]
-
-        response = requests.get(
-            OPEN_METEO_URL,
-            params={
-                "latitude": latitude,
-                "longitude": longitude,
-                "hourly": "temperature_2m",
-                "temperature_unit": "fahrenheit",
-                "forecast_days": 1,
-                "timezone": "UTC",
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        samples = payload["hourly"]["temperature_2m"]
-
+        samples = fetch_station_temperatures(station_id)
         return {
             "station_id": station_id,
             "raw_temp_samples": samples,
@@ -85,6 +51,22 @@ class CalibrationAndEdgeCore:
                     rmse REAL,
                     sigma REAL
                 )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS edge_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    station_id TEXT,
+                    token_id TEXT,
+                    bucket TEXT,
+                    market_price REAL,
+                    model_prob REAL,
+                    expected_value REAL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_edge_history_token
+                ON edge_history (token_id, timestamp)
             """)
             conn.commit()
 
@@ -124,22 +106,54 @@ class CalibrationAndEdgeCore:
 
         # Compute edge arrays: Expected Value (EV) = Model Probability - Market Price
         processed_matrix = []
+        history_rows = []
+        generated_at = datetime.utcnow().isoformat()
         for contract in market_data:
             low, high = self._parse_bucket_range(contract["bucket"])
             # P(low <= temp <= high) under N(mean_temp, sigma) via the CDF.
             model_prob = self._normal_cdf(high, mean_temp, sigma) - self._normal_cdf(low, mean_temp, sigma)
             model_prob = max(0.0, min(1.0, model_prob))
             expected_value = model_prob - contract["price"]
+            model_prob, expected_value = round(model_prob, 2), round(expected_value, 2)
 
             processed_matrix.append({
                 "bucket": contract["bucket"],
                 "market_price": contract["price"],
-                "model_prob": round(model_prob, 2),
-                "expected_value": round(expected_value, 2),
+                "model_prob": model_prob,
+                "expected_value": expected_value,
                 "token_id": contract["token_id"],
                 "generated_at_utc": weather_data["timestamp_utc"]
             })
+            history_rows.append((
+                generated_at, weather_data["station_id"], contract["token_id"],
+                contract["bucket"], contract["price"], model_prob, expected_value
+            ))
+
+        # Persist every bucket's edge for this cycle so per-token history can be queried later.
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """INSERT INTO edge_history
+                   (timestamp, station_id, token_id, bucket, market_price, model_prob, expected_value)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                history_rows
+            )
+            conn.commit()
+
         return processed_matrix
+
+    def get_edge_history(self, token_id: str, limit: int = 100) -> list:
+        """Return the most recent recorded edge snapshots for a single token, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT timestamp, station_id, token_id, bucket, market_price, model_prob, expected_value
+                   FROM edge_history
+                   WHERE token_id = ?
+                   ORDER BY id DESC
+                   LIMIT ?""",
+                (token_id, limit)
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 class FreemiumGateway:
@@ -168,17 +182,3 @@ class FreemiumGateway:
                     "generated_at_utc": "15_MINS_DELAYED"
                 })
         return masked_output
-
-
-if __name__ == "__main__":
-    print("Executing internal diagnostics test...")
-    ingest = IngestionEngine()
-    core = CalibrationAndEdgeCore()
-    
-    w_raw = ingest.fetch_weather_matrix("KORD")
-    m_raw = ingest.fetch_polymarket_clob("m-1234")
-    calculated = core.compute_gaussian_edges(w_raw, m_raw)
-    
-    print("\n--- Diagnostic Mask View: Free Tier User ---")
-    print(FreemiumGateway.apply_tier_mask(calculated, is_premium=False))
-    print("\n[SUCCESS] Local pipeline diagnostic test complete. Database initialized.")

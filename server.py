@@ -13,12 +13,17 @@ GLOBAL_ALPHA_CACHE = {
 # Production API Key Database Mock
 VALID_PREMIUM_KEYS = {"sk_live_weather_edge_alpha_99", "sk_live_internal_puchong_node"}
 
+# Shared handle to the calibration core so route handlers can query edge_history
+CORE_ENGINE = None
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Asynchronous continuous collection background loop"""
+    global CORE_ENGINE
     ingest = IngestionEngine()
     core = CalibrationAndEdgeCore()
-    
+    CORE_ENGINE = core
+
     async def statistical_calculation_worker():
         loop = asyncio.get_running_loop()
         while True:
@@ -72,4 +77,34 @@ async def get_alpha_matrix(x_api_key: str = Header(default=None)):
             "cache_timestamp_utc": GLOBAL_ALPHA_CACHE["last_updated"]
         },
         "results": secured_payload
+    }
+
+
+@app.get("/api/v1/weather/edges/history/{token_id}")
+async def get_edge_history(token_id: str, x_api_key: str = Header(default=None), limit: int = 100):
+    """Per-contract edge history: how model_prob/market_price/expected_value moved over time."""
+    is_premium = x_api_key in VALID_PREMIUM_KEYS
+
+    rows = CORE_ENGINE.get_edge_history(token_id, limit=limit)
+    # Reshape rows to match the FreemiumGateway's expected node structure, then
+    # apply the same free/premium redaction rule used on the live matrix.
+    normalized = [
+        {
+            "bucket": row["bucket"],
+            "market_price": row["market_price"],
+            "model_prob": row["model_prob"],
+            "expected_value": row["expected_value"],
+            "token_id": row["token_id"],
+            "generated_at_utc": row["timestamp"],
+        }
+        for row in rows
+    ]
+    secured_history = FreemiumGateway.apply_tier_mask(normalized, is_premium=is_premium)
+
+    return {
+        "status": "success",
+        "tier_context": "premium" if is_premium else "free_unauthenticated",
+        "token_id": token_id,
+        "count": len(secured_history),
+        "history": secured_history
     }
