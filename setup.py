@@ -15,7 +15,7 @@ setup(
     name="edge-aggregator",
     version="0.1.0",
     description="Freemium edge aggregator for Polymarket weather prediction markets",
-    py_modules=["aggregator", "server", "weather_source", "dashboard"],
+    py_modules=["aggregator", "server", "weather_source", "polymarket_source", "dashboard"],
     install_requires=[
         "fastapi",
         "uvicorn",

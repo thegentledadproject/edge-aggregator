@@ -7,6 +7,7 @@ import statistics
 from datetime import datetime
 
 from weather_source import fetch_station_temperatures
+from polymarket_source import fetch_market_prices
 
 
 class IngestionEngine:
@@ -22,14 +23,8 @@ class IngestionEngine:
             "timestamp_utc": int(time.time())
         }
 
-    def fetch_polymarket_clob(self, market_id: str) -> list:
-        # Simulating external raw Central Limit Order Book (CLOB) payload arrays
-        return [
-            {"bucket": "75-77°F", "price": 0.35, "token_id": "0x2a8e991cf3f1"},
-            {"bucket": "78-80°F", "price": 0.45, "token_id": "0x3b9f002dg4h2"},
-            {"bucket": "82-84°F", "price": 0.12, "token_id": "0x4f7d223ab8d1"},
-            {"bucket": "85-87°F", "price": 0.60, "token_id": "0x7e2a4411bc89"}
-        ]
+    def fetch_polymarket_clob(self, station_id: str) -> list:
+        return fetch_market_prices(station_id)
 
 
 class CalibrationAndEdgeCore:
@@ -96,14 +91,6 @@ class CalibrationAndEdgeCore:
         sigma = statistics.stdev(samples) if len(samples) > 1 else 0.0
         rmse = sigma / math.sqrt(len(samples)) if samples else 0.0
 
-        # Write validation metrics to database (thread-safe inside lifecycle loop)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "INSERT INTO statistical_logs (timestamp, station_id, rmse, sigma) VALUES (?, ?, ?, ?)",
-                (datetime.utcnow().isoformat(), weather_data["station_id"], rmse, sigma)
-            )
-            conn.commit()
-
         # Compute edge arrays: Expected Value (EV) = Model Probability - Market Price
         processed_matrix = []
         history_rows = []
@@ -129,8 +116,13 @@ class CalibrationAndEdgeCore:
                 contract["bucket"], contract["price"], model_prob, expected_value
             ))
 
-        # Persist every bucket's edge for this cycle so per-token history can be queried later.
+        # Write validation metrics and every bucket's edge for this cycle in one
+        # connection/transaction (thread-safe inside lifecycle loop).
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO statistical_logs (timestamp, station_id, rmse, sigma) VALUES (?, ?, ?, ?)",
+                (generated_at, weather_data["station_id"], rmse, sigma)
+            )
             conn.executemany(
                 """INSERT INTO edge_history
                    (timestamp, station_id, token_id, bucket, market_price, model_prob, expected_value)

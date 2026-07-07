@@ -9,7 +9,7 @@ def run_diagnostic():
     core = CalibrationAndEdgeCore()
 
     w_raw = ingest.fetch_weather_matrix("KORD")
-    m_raw = ingest.fetch_polymarket_clob("m-1234")
+    m_raw = ingest.fetch_polymarket_clob("KORD")
     calculated = core.compute_gaussian_edges(w_raw, m_raw)
 
     print("\n--- Diagnostic Mask View: Free Tier User ---")
