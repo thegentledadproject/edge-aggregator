@@ -1,2 +1,3 @@
 __pycache__/
 dashboard_alpha.db
+.env

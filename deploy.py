@@ -25,6 +25,7 @@ After=network.target
 [Service]
 User={user}
 WorkingDirectory={remote_dir}
+EnvironmentFile=-{remote_dir}/.env
 ExecStart={remote_dir}/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
@@ -48,14 +49,21 @@ def run_scp(host, key, user, local_paths, remote_dir):
     )
 
 
-def deploy(host, key, user, remote_dir):
-    print(f"[1/5] Ensuring {remote_dir} exists on {host}...")
+def deploy(host, key, user, remote_dir, env_file=None):
+    print(f"[1/6] Ensuring {remote_dir} exists on {host}...")
     run_ssh(host, key, user, f"mkdir -p {remote_dir}")
 
-    print("[2/5] Uploading application files...")
+    print("[2/6] Uploading application files...")
     run_scp(host, key, user, APP_FILES, remote_dir)
 
-    print("[3/5] Installing system deps and Python venv...")
+    if env_file:
+        print(f"[3/6] Uploading env file {env_file} -> {remote_dir}/.env ...")
+        run_scp(host, key, user, [env_file], remote_dir)
+        run_ssh(host, key, user, f"mv {remote_dir}/{env_file.split('/')[-1]} {remote_dir}/.env && chmod 600 {remote_dir}/.env")
+    else:
+        print("[3/6] No --env-file given, skipping (VALID_PREMIUM_KEYS etc. will be unset).")
+
+    print("[4/6] Installing system deps and Python venv...")
     run_ssh(
         host, key, user,
         "sudo apt-get update -y && sudo apt-get install -y python3-venv python3-pip && "
@@ -64,11 +72,11 @@ def deploy(host, key, user, remote_dir):
         f"{remote_dir}/venv/bin/pip install -r {remote_dir}/requirements.txt"
     )
 
-    print("[4/5] Writing systemd service unit...")
+    print("[5/6] Writing systemd service unit...")
     unit_content = SERVICE_UNIT.format(user=user, remote_dir=remote_dir)
     run_ssh(host, key, user, f"sudo tee /etc/systemd/system/weather-edge.service > /dev/null << 'EOF'\n{unit_content}EOF")
 
-    print("[5/5] Enabling and starting the service...")
+    print("[6/6] Enabling and starting the service...")
     run_ssh(
         host, key, user,
         "sudo systemctl daemon-reload && "
@@ -87,10 +95,11 @@ def main():
     parser.add_argument("--key", required=True, help="Path to the SSH private key (.pem)")
     parser.add_argument("--user", default="ubuntu", help="SSH user (default: ubuntu)")
     parser.add_argument("--remote-dir", default="/home/ubuntu/weather-edge-aggregator", help="Remote deploy directory")
+    parser.add_argument("--env-file", default=None, help="Local .env file to upload (e.g. containing VALID_PREMIUM_KEYS); see .env.example")
     args = parser.parse_args()
 
     try:
-        deploy(args.host, args.key, args.user, args.remote_dir)
+        deploy(args.host, args.key, args.user, args.remote_dir, args.env_file)
     except subprocess.CalledProcessError as e:
         print(f"[DEPLOY FAILED] {e}", file=sys.stderr)
         sys.exit(1)

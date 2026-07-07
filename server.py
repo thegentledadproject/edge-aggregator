@@ -1,5 +1,6 @@
 # server.py
 import asyncio
+import os
 from fastapi import FastAPI, Header, HTTPException, Request
 from contextlib import asynccontextmanager
 from aggregator import IngestionEngine, CalibrationAndEdgeCore, FreemiumGateway
@@ -15,8 +16,11 @@ GLOBAL_ALPHA_CACHE = {
     "stations": {station_id: {"data": [], "last_updated": None} for station_id in POLLED_STATIONS}
 }
 
-# Production API Key Database Mock
-VALID_PREMIUM_KEYS = {"sk_live_weather_edge_alpha_99", "sk_live_internal_puchong_node"}
+# Premium API keys, comma-separated in the VALID_PREMIUM_KEYS env var
+# (e.g. "sk_live_abc,sk_live_def"). No keys are granted premium access if unset.
+VALID_PREMIUM_KEYS = {
+    key.strip() for key in os.getenv("VALID_PREMIUM_KEYS", "").split(",") if key.strip()
+}
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
